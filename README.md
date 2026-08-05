@@ -4,9 +4,22 @@ Run the **OpenAI Codex CLI / desktop app** on **OpenCode Zen** models (including
 
 Codex speaks the OpenAI **Responses API**; OpenCode Zen exposes a **Chat Completions** API. This repo contains a ~460-line Node.js proxy that bridges the two on `localhost:4001`, plus a one-command PowerShell installer that recreates the entire working setup.
 
+## Get your OpenCode Zen API key (tutorial)
+
+The installer walks you through this interactively, but here's the whole flow so you know what to expect.
+
+1. **Open the sign-in page**: <https://opencode.ai/auth> (or go to <https://opencode.ai> and click **Zen** → **Get started**).
+2. **Sign in** with **GitHub** or **Google**.
+3. **Add billing details**: Zen is pay-as-you-go — top up a balance (e.g. $20) with a card, no subscription. It bills per request, zero markup.
+4. **Create a key**: in your Zen dashboard go to **API keys** → **Create API key**. Give it a name like `codex-zen-proxy`.
+5. **Copy the key** — it starts with `sk-` and looks like `sk-xxxxxxxxxxxxxxxx...`.
+6. **Paste it** into the installer when prompted (your input is masked). It is saved only to your Windows **User** environment variable `OPENCODE_ZEN_API_KEY` on this machine.
+
+> Tip: you can also supply the key non-interactively with `-ApiKey sk-xxxx` so the script never asks.
+
 ## Setup (one command)
 
-Prerequisites: Windows, PowerShell, [Node.js](https://nodejs.org) >= 16, and an [OpenCode Zen](https://opencode.ai) API key.
+Prerequisites: Windows, PowerShell, [Node.js](https://nodejs.org) >= 16, and an [OpenCode Zen](https://opencode.ai) API key (see above).
 
 ```powershell
 powershell -Command "irm https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1 | iex"
@@ -19,14 +32,21 @@ git clone https://github.com/marceli1404/codex-zen-proxy && cd codex-zen-proxy
 powershell -ExecutionPolicy Bypass -File setup.ps1
 ```
 
+The installer is interactive and guided — it shows a step-by-step progress with colored status, a **masked API-key input section** (with a shortcut that opens the key page for you), and a numbered **model picker**. Skip any prompt by passing options up front:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup.ps1 -ApiKey sk-xxxx -Model big-pickle
+```
+
 What `setup.ps1` does:
 
 1. Checks Node.js.
 2. Installs `responses-proxy.js`, `start-proxy.ps1`, and `model-catalog.json` into `%USERPROFILE%\.codex` (respects `CODEX_HOME`).
-3. Saves your `OPENCODE_ZEN_API_KEY` in the Windows **User** environment (prompts if missing).
-4. Auto-detects the Codex `node_repl.exe` runtime (Computer Use / MCP plugins) and wires it up.
-5. Backs up any existing `config.toml` and generates a fresh one pointing Codex at `http://localhost:4001/v1`.
-6. (Re)starts the proxy and health-checks `http://localhost:4001/health`.
+3. Shows the **API key section**: reuses your saved key if present, or guides you through getting one and prompts with masked input; saves it to the Windows **User** environment.
+4. Lets you pick a **model** (numbered menu) and writes it to `config.toml`.
+5. Auto-detects the Codex `node_repl.exe` runtime (Computer Use / MCP plugins) and wires it up.
+6. Backs up any existing `config.toml` and generates a fresh one pointing Codex at `http://localhost:4001/v1`.
+7. (Re)starts the proxy and health-checks `http://localhost:4001/health`.
 
 Then **fully quit and restart** the Codex desktop app, or test the CLI immediately:
 
