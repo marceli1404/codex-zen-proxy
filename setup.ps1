@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 # Codex <-> OpenCode Zen bridge - one-command setup
 #
 # Installs the Responses-API translation proxy into ~/.codex, generates a
@@ -12,7 +12,7 @@
 #   powershell -ExecutionPolicy Bypass -File setup.ps1
 #
 #   # or the fully single-line form:
-#   powershell -Command "irm https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1 | iex"
+#   powershell -Command '$f = Join-Path $env:TEMP setup.ps1; irm "https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1" -OutFile $f; & $f'
 #
 # Options:
 #   -ApiKey   <key>   OpenCode Zen API key (skips the key prompt)
