@@ -128,6 +128,55 @@ function Write-ResultBox {
     Write-Host ""
 }
 
+# ---- Zen free-quota helpers ------------------------------------------------
+# Zen has no public quota API, so the bar is measured by the local proxy
+# (responses-proxy.js): request count + tokens per UTC day via GET /usage.
+
+function Format-TokenCount {
+    param([long]$N)
+    if ($N -ge 1000000000) { return ("{0:0.#}B" -f ($N / 1e9)) }
+    if ($N -ge 1000000)    { return ("{0:0.#}M" -f ($N / 1e6)) }
+    if ($N -ge 1000)       { return ("{0:0.#}K" -f ($N / 1e3)) }
+    return "$N"
+}
+
+function Get-ZenUsage {
+    param([int]$Port = 4001)
+    try {
+        return Invoke-RestMethod "http://localhost:$Port/v1/usage" -TimeoutSec 4
+    } catch {
+        return $null
+    }
+}
+
+function Get-UsagePercent {
+    param([long]$Used, [long]$Limit)
+    if ($Limit -le 0) { return 0 }
+    return [Math]::Min(100, [Math]::Max(0, [int](100 * $Used / $Limit)))
+}
+
+function Get-UsageColor {
+    param([int]$Pct)
+    if ($Pct -lt 50) { return "Green" }
+    if ($Pct -lt 80) { return "Yellow" }
+    return "Red"
+}
+
+function Write-UsageBar {
+    param([object]$Usage, [int]$Port = 4001)
+    if ($null -eq $Usage) {
+        Write-ConsoleLine "warn" "Free quota: proxy not running on port $Port (starts after install or via start-proxy.ps1)."
+        return
+    }
+    $reqPct = Get-UsagePercent -Used $Usage.requests -Limit $Usage.limits.requests
+    $tokPct = Get-UsagePercent -Used $Usage.totalTokens -Limit $Usage.limits.tokens
+    $reqFill = [int](20 * $reqPct / 100)
+    $tokFill = [int](20 * $tokPct / 100)
+    Write-Host ("   Requests : [" + ("█" * $reqFill) + ("░" * (20 - $reqFill)) + "] {0,3}%  {1} / {2} today" -f $reqPct, $Usage.requests, $Usage.limits.requests) -ForegroundColor (Get-UsageColor $reqPct)
+    Write-Host ("   Tokens   : [" + ("█" * $tokFill) + ("░" * (20 - $tokFill)) + "] {0,3}%  {1} / {2} free today (day {3}, resets 00:00 UTC)" -f $tokPct, (Format-TokenCount $Usage.totalTokens), (Format-TokenCount $Usage.limits.tokens), $Usage.day) -ForegroundColor (Get-UsageColor $tokPct)
+    Write-ConsoleLine "info" ("Limits (~{0} req / {1} tok per day) are community-observed free-tier numbers - tune via CODEX_ZEN_REQ_LIMIT / CODEX_ZEN_TOKEN_LIMIT." -f $Usage.limits.requests, $Usage.limits.tokens)
+}
+
 # -----------------------------------------------------------------------------
 # Core install routine - shared by the GUI and the terminal UI.
 # Emits progress via $OnProgress (percent 0-100) and log lines via
@@ -302,6 +351,10 @@ function Start-CliInstaller {
     $Interactive = Test-Interactive
     $CodexHome = Get-ResolvedCodexHome
 
+    # ---- free quota section (measured by the local proxy) ----
+    Write-SectionHeader "Free quota today (free models)"
+    Write-UsageBar -Usage (Get-ZenUsage -Port $Port) -Port $Port
+
     # ---- API key section ----
     Write-SectionHeader "OpenCode Zen API key"
     $Key = $ApiKey
@@ -395,6 +448,12 @@ function Start-CliInstaller {
         "3. Change model/provider any time in config.toml."
         "4. Logs: $($Result.CodexHome)\proxy-debug.log"
     )
+
+    # ---- live quota after install (if the proxy just started) ----
+    if ($Result.Healthy) {
+        Write-SectionHeader "Free quota today (live)"
+        Write-UsageBar -Usage (Get-ZenUsage -Port $Port) -Port $Port
+    }
 }
 
 # -----------------------------------------------------------------------------
@@ -413,6 +472,8 @@ function Show-GuiInstaller {
     $CYAN   = [System.Drawing.Color]::FromArgb(34, 211, 238)
     $ACCENT = [System.Drawing.Color]::FromArgb(14, 165, 233)
     $GREEN  = [System.Drawing.Color]::FromArgb(74, 222, 128)
+    $YELLOW = [System.Drawing.Color]::FromArgb(250, 204, 21)
+    $RED    = [System.Drawing.Color]::FromArgb(248, 113, 113)
     $TEXT   = [System.Drawing.Color]::FromArgb(226, 232, 240)
     $MUTED  = [System.Drawing.Color]::FromArgb(148, 163, 184)
     $BTN    = [System.Drawing.Color]::FromArgb(51, 65, 85)
@@ -425,7 +486,7 @@ function Show-GuiInstaller {
     $form.MinimizeBox = $true
     $form.BackColor = $BG
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-    $form.ClientSize = New-Object System.Drawing.Size(600, 672)
+    $form.ClientSize = New-Object System.Drawing.Size(600, 780)
 
     # ---- banner ----
     $accentBar = New-Object System.Windows.Forms.Panel
@@ -552,11 +613,86 @@ function Show-GuiInstaller {
     $homeLbl.ForeColor = $MUTED
     $form.Controls.Add($homeLbl)
 
-    # ---- 4. Progress ----
-    $form.Controls.Add($( & $makeSection 388 "4.  PROGRESS"))
+    # ---- 5. Free quota today ----
+    $form.Controls.Add($( & $makeSection 388 "5.  FREE QUOTA TODAY  (measured by your local proxy)"))
+
+    $reqBar = New-Object System.Windows.Forms.ProgressBar
+    $reqBar.Location = New-Object System.Drawing.Point(24, 412)
+    $reqBar.Size = New-Object System.Drawing.Size(552, 16)
+    $reqBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
+    $reqBar.Minimum = 0
+    $reqBar.Maximum = 100
+    $form.Controls.Add($reqBar)
+
+    $reqLbl = New-Object System.Windows.Forms.Label
+    $reqLbl.Location = New-Object System.Drawing.Point(24, 434)
+    $reqLbl.Size = New-Object System.Drawing.Size(552, 18)
+    $reqLbl.ForeColor = $TEXT
+    $reqLbl.Text = "Requests : n/a"
+    $form.Controls.Add($reqLbl)
+
+    $tokBar = New-Object System.Windows.Forms.ProgressBar
+    $tokBar.Location = New-Object System.Drawing.Point(24, 456)
+    $tokBar.Size = New-Object System.Drawing.Size(552, 16)
+    $tokBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
+    $tokBar.Minimum = 0
+    $tokBar.Maximum = 100
+    $form.Controls.Add($tokBar)
+
+    $tokLbl = New-Object System.Windows.Forms.Label
+    $tokLbl.Location = New-Object System.Drawing.Point(24, 478)
+    $tokLbl.Size = New-Object System.Drawing.Size(552, 18)
+    $tokLbl.ForeColor = $TEXT
+    $tokLbl.Text = "Tokens   : n/a"
+    $form.Controls.Add($tokLbl)
+
+    $usageStatus = New-Object System.Windows.Forms.Label
+    $usageStatus.Location = New-Object System.Drawing.Point(24, 502)
+    $usageStatus.Size = New-Object System.Drawing.Size(400, 20)
+    $usageStatus.ForeColor = $MUTED
+    $usageStatus.Text = "Proxy not running yet - start it, then Refresh."
+    $form.Controls.Add($usageStatus)
+
+    $refreshLink = New-Object System.Windows.Forms.LinkLabel
+    $refreshLink.Location = New-Object System.Drawing.Point(470, 502)
+    $refreshLink.Size = New-Object System.Drawing.Size(106, 20)
+    $refreshLink.Text = "Refresh"
+    $refreshLink.LinkColor = $CYAN
+    $refreshLink.ActiveLinkColor = $ACCENT
+    $form.Controls.Add($refreshLink)
+
+    $updateUsage = {
+        try {
+            $pu = Invoke-RestMethod "http://localhost:$([int]$portBox.Value)/v1/usage" -TimeoutSec 3
+            $rp = Get-UsagePercent -Used $pu.requests -Limit $pu.limits.requests
+            $tp = Get-UsagePercent -Used $pu.totalTokens -Limit $pu.limits.tokens
+            $reqBar.Value = $rp
+            $tokBar.Value = $tp
+            $reqLbl.Text = "Requests : {0} / {1} today  ({2}%)" -f $pu.requests, $pu.limits.requests, $rp
+            $tokLbl.Text = "Tokens   : {0} / {1} free today  ({2}%)" -f (Format-TokenCount $pu.totalTokens), (Format-TokenCount $pu.limits.tokens), $tp
+            $reqLbl.ForeColor = if ($rp -lt 50) { $GREEN } elseif ($rp -lt 80) { $YELLOW } else { $RED }
+            $tokLbl.ForeColor = if ($tp -lt 50) { $GREEN } elseif ($tp -lt 80) { $YELLOW } else { $RED }
+            $usageStatus.Text = "Day $($pu.day) - resets at 00:00 UTC - limits are ~$($pu.limits.requests) req / $(Format-TokenCount $pu.limits.tokens) tok"
+            $usageStatus.ForeColor = $MUTED
+        } catch {
+            $reqBar.Value = 0
+            $tokBar.Value = 0
+            $reqLbl.Text = "Requests : n/a"
+            $tokLbl.Text = "Tokens   : n/a"
+            $reqLbl.ForeColor = $MUTED
+            $tokLbl.ForeColor = $MUTED
+            $usageStatus.Text = "Proxy not running on port $([int]$portBox.Value) - start it, then Refresh."
+            $usageStatus.ForeColor = $MUTED
+        }
+    }
+    $refreshLink.Add_LinkClicked({ & $updateUsage })
+    $portBox.Add_ValueChanged({ & $updateUsage })
+
+    # ---- 6. Install progress ----
+    $form.Controls.Add($( & $makeSection 532 "6.  INSTALL PROGRESS"))
 
     $progress = New-Object System.Windows.Forms.ProgressBar
-    $progress.Location = New-Object System.Drawing.Point(24, 412)
+    $progress.Location = New-Object System.Drawing.Point(24, 556)
     $progress.Size = New-Object System.Drawing.Size(552, 20)
     $progress.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
     $progress.Minimum = 0
@@ -564,8 +700,8 @@ function Show-GuiInstaller {
     $form.Controls.Add($progress)
 
     $logBox = New-Object System.Windows.Forms.ListBox
-    $logBox.Location = New-Object System.Drawing.Point(24, 440)
-    $logBox.Size = New-Object System.Drawing.Size(552, 140)
+    $logBox.Location = New-Object System.Drawing.Point(24, 584)
+    $logBox.Size = New-Object System.Drawing.Size(552, 100)
     $logBox.BackColor = $FIELD
     $logBox.ForeColor = $TEXT
     $logBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
@@ -575,7 +711,7 @@ function Show-GuiInstaller {
 
     # ---- buttons ----
     $cancelBtn = New-Object System.Windows.Forms.Button
-    $cancelBtn.Location = New-Object System.Drawing.Point(24, 602)
+    $cancelBtn.Location = New-Object System.Drawing.Point(24, 710)
     $cancelBtn.Size = New-Object System.Drawing.Size(110, 34)
     $cancelBtn.Text = "Cancel"
     $cancelBtn.BackColor = $BTN
@@ -586,7 +722,7 @@ function Show-GuiInstaller {
     $form.Controls.Add($cancelBtn)
 
     $installBtn = New-Object System.Windows.Forms.Button
-    $installBtn.Location = New-Object System.Drawing.Point(466, 602)
+    $installBtn.Location = New-Object System.Drawing.Point(466, 710)
     $installBtn.Size = New-Object System.Drawing.Size(110, 34)
     $installBtn.Text = "Install"
     $installBtn.BackColor = $ACCENT
@@ -654,6 +790,8 @@ function Show-GuiInstaller {
         }
     })
     $form.Controls.Add($installBtn)
+
+    & $updateUsage
 
     if ($SmokeTest) {
         $form.Dispose()

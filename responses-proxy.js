@@ -28,7 +28,85 @@ const LOG_DIR = process.env.CODEX_ZEN_LOG_DIR || path.join(os.homedir(), '.codex
 const LOG = path.join(LOG_DIR, 'proxy-debug.log');
 const DEBUG_FILES = process.env.CODEX_ZEN_DEBUG_FILES === '1';
 
+// Daily free-quota tracking. Zen does not publish a quota API, so the proxy
+// measures what it actually relays: request count + input/output tokens per
+// UTC day, persisted to zen-usage.json and served from GET /usage. The
+// defaults (200 requests / 500K tokens per day) come from community-observed
+// free-tier limits; override via CODEX_ZEN_REQ_LIMIT / CODEX_ZEN_TOKEN_LIMIT.
+const REQ_LIMIT = parseInt(process.env.CODEX_ZEN_REQ_LIMIT || '200', 10);
+const TOKEN_LIMIT = parseInt(process.env.CODEX_ZEN_TOKEN_LIMIT || '500000', 10);
+const USAGE_FILE = path.join(LOG_DIR, 'zen-usage.json');
+
 fs.mkdirSync(LOG_DIR, { recursive: true });
+
+// --- usage tracking ---------------------------------------------------------
+function utcDay() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function emptyUsage() {
+  return {
+    day: utcDay(),
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    models: {}
+  };
+}
+
+function loadUsage() {
+  try {
+    const raw = fs.readFileSync(USAGE_FILE, 'utf8');
+    const saved = JSON.parse(raw);
+    if (saved && saved.day === utcDay()) return saved;
+  } catch { /* first run or corrupt file */ }
+  const fresh = emptyUsage();
+  persistUsage(fresh);
+  return fresh;
+}
+
+function persistUsage(u) {
+  try {
+    fs.writeFileSync(USAGE_FILE + '.tmp', JSON.stringify(u, null, 2));
+    fs.renameSync(USAGE_FILE + '.tmp', USAGE_FILE);
+  } catch (e) {
+    log(`!! USAGE PERSIST FAILED: ${e.message}`);
+  }
+}
+
+let usage = loadUsage();
+
+function recordUsage(model, inputTokens, outputTokens) {
+  if (usage.day !== utcDay()) usage = emptyUsage();
+  const inT = Math.max(0, Number(inputTokens) || 0);
+  const outT = Math.max(0, Number(outputTokens) || 0);
+  usage.requests += 1;
+  usage.inputTokens += inT;
+  usage.outputTokens += outT;
+  usage.totalTokens += inT + outT;
+  const m = usage.models[model] || (usage.models[model] = { requests: 0, inputTokens: 0, outputTokens: 0 });
+  m.requests += 1;
+  m.inputTokens += inT;
+  m.outputTokens += outT;
+  persistUsage(usage);
+}
+
+function usagePayload() {
+  if (usage.day !== utcDay()) usage = emptyUsage();
+  return {
+    day: usage.day,
+    requests: usage.requests,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    requestsRemaining: Math.max(0, REQ_LIMIT - usage.requests),
+    tokensRemaining: Math.max(0, TOKEN_LIMIT - usage.totalTokens),
+    limits: { requests: REQ_LIMIT, tokens: TOKEN_LIMIT },
+    models: usage.models,
+    resetsAt: new Date(utcDay() + 'T00:00:00.000Z').toISOString()
+  };
+}
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
@@ -222,6 +300,12 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && /\/(v1\/)?usage/.test(req.url)) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(usagePayload()));
+    return;
+  }
+
   if (req.method === 'POST' && /\/(v1\/)?responses/.test(req.url)) {
     let body = '';
     req.on('data', c => body += c);
@@ -248,7 +332,9 @@ const server = http.createServer((req, res) => {
         log(`>> MODEL: ${parsed.model}, stream: ${isStream}, messages: ${chatBody.messages.length}`);
 
         const url = new URL(`${ZEN_BASE}/chat/completions`);
-        const postData = JSON.stringify({ ...chatBody, stream: isStream });
+        const postData = JSON.stringify(isStream
+          ? { ...chatBody, stream: true, stream_options: { include_usage: true } }
+          : { ...chatBody, stream: false });
 
         log(`>> MESSAGES: ${chatBody.messages.length} total`);
 
@@ -274,6 +360,8 @@ const server = http.createServer((req, res) => {
             let msgSent = false;
             let fullText = '';
             let activeItemId = null;
+            // Usage arrives in the final chunk (stream_options.include_usage).
+            let streamUsage = null;
             // Zen sends each tool call with an `index`. Multiple tool calls can
             // arrive in one response, so track per-index state instead of one
             // shared callId/callName/callArgs (which merged calls like
@@ -338,6 +426,9 @@ const server = http.createServer((req, res) => {
                 if (!data || data === '[DONE]') continue;
                 try {
                   const chunk = JSON.parse(data);
+                  if (chunk.usage && (chunk.usage.prompt_tokens !== undefined || chunk.usage.total_tokens !== undefined)) {
+                    streamUsage = chunk.usage;
+                  }
                   const delta = chunk.choices?.[0]?.delta;
                   const finish = chunk.choices?.[0]?.finish_reason;
                   if (!delta) continue;
@@ -423,6 +514,7 @@ const server = http.createServer((req, res) => {
                 type: 'response.completed', response: { id: requestId, object: 'response', status: 'completed', output: [] }
               });
               res.end();
+              recordUsage(chatBody.model, streamUsage?.prompt_tokens, streamUsage?.completion_tokens);
               log(`<< STREAM COMPLETED (text: ${fullText.slice(0, 80)})`);
             });
 
@@ -447,6 +539,7 @@ const server = http.createServer((req, res) => {
                   const responsesResp = translateToResponses(chatResp, requestId);
                   res.writeHead(200, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify(responsesResp));
+                  recordUsage(chatBody.model, chatResp.usage?.prompt_tokens, chatResp.usage?.completion_tokens);
                 }
               } catch (e) {
                 log(`<< PARSE ERROR: ${e.message}`);
