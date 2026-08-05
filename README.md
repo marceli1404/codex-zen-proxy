@@ -47,6 +47,7 @@ What `setup.ps1` does:
 5. Auto-detects the Codex `node_repl.exe` runtime (Computer Use / MCP plugins) and wires it up.
 6. Backs up any existing `config.toml` and generates a fresh one pointing Codex at `http://localhost:4001/v1`.
 7. (Re)starts the proxy and health-checks `http://localhost:4001/health`.
+8. Shows your **free quota today** as two progress bars (requests + tokens), both in the CLI and in the GUI installer.
 
 Then **fully quit and restart** the Codex desktop app, or test the CLI immediately:
 
@@ -93,14 +94,24 @@ The proxy performs three critical translations:
 
 Also handled: `developer` role → `system`, `input_text` blocks → plain strings, `reasoning` items dropped, `function_call`/`function_call_output` history re-mapped into `tool_calls`/`tool` messages, tool-name dedup on repeated SSE deltas.
 
+## Free quota tracking
+
+OpenCode Zen has **no public quota/balance API**, so the proxy measures your usage itself: it counts every relayed request and its input/output tokens, bucketed per UTC day, and persists them to `~/.codex/zen-usage.json` (atomic write, survives restarts). The installer (CLI + GUI) and `push.ps1` display the result as two progress bars.
+
+- Endpoint: `GET http://localhost:4001/v1/usage` → `{ day, requests, totalTokens, models: {...}, limits: { requests, tokens } }`.
+- Daily limits default to `200` requests and `500000` tokens (community-observed free-tier numbers) and reset at `00:00 UTC`.
+- Tune the limits with env vars `CODEX_ZEN_REQ_LIMIT` / `CODEX_ZEN_TOKEN_LIMIT`.
+- Streaming usage is captured by enabling `stream_options.include_usage` upstream and reading the final chunk.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY` |
+| `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY`, `CODEX_ZEN_REQ_LIMIT`, `CODEX_ZEN_TOKEN_LIMIT` |
 | `setup.ps1` | One-command installer described above |
 | `start-proxy.ps1` | Manually launch the proxy (reads the API key from the User environment) |
 | `model-catalog.json` | Minimal Codex model catalog exposing the 7 free Zen models |
+| `push.ps1` | Show today's free quota bar, then commit + push this repo |
 
 ## Troubleshooting
 
