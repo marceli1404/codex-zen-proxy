@@ -21,6 +21,7 @@
 #   -NoStart          Install/configure only, do not launch the proxy
 #   -Cli              Force the terminal UI (no GUI window)
 #   -GuiSmoke         (internal) build the GUI without showing it
+#   -GuiProbe         (internal) build the GUI, populate the quota bars, print JSON, exit
 # =============================================================================
 
 [CmdletBinding()]
@@ -30,7 +31,8 @@ param(
     [int]$Port = 4001,
     [switch]$NoStart,
     [switch]$Cli,
-    [switch]$GuiSmoke
+    [switch]$GuiSmoke,
+    [switch]$GuiProbe
 )
 
 $ErrorActionPreference = "Stop"
@@ -230,9 +232,19 @@ function Invoke-BridgeInstall {
     if (-not ($InstallApiKey -like "sk-*")) {
         $OnLog.Invoke("warn", "Key does not start with 'sk-' - continuing (double-check it is a Zen key).")
     }
-    [System.Environment]::SetEnvironmentVariable("OPENCODE_ZEN_API_KEY", $InstallApiKey, "User")
-    $env:OPENCODE_ZEN_API_KEY = $InstallApiKey
-    $OnLog.Invoke("ok", "API key saved to your User environment (OPENCODE_ZEN_API_KEY).")
+    if ($InstallApiKey -match "(?i)(test|dummy|fake|placeholder|example)" -or $InstallApiKey.Length -lt 40) {
+        $OnLog.Invoke("err", "Refusing to save a test/dummy API key (len $($InstallApiKey.Length), must be >= 40 chars).")
+        throw "API key 'sk-$($InstallApiKey.Substring(3, [Math]::Min(5, $InstallApiKey.Length - 3)))...' looks like a test or example key. Get a real key at $AuthUrl."
+    }
+    $DefaultHome = Join-Path $env:USERPROFILE ".codex"
+    if ($CodexHome -eq $DefaultHome) {
+        [System.Environment]::SetEnvironmentVariable("OPENCODE_ZEN_API_KEY", $InstallApiKey, "User")
+        $env:OPENCODE_ZEN_API_KEY = $InstallApiKey
+        $OnLog.Invoke("ok", "API key saved to your User environment (OPENCODE_ZEN_API_KEY).")
+    } else {
+        $env:OPENCODE_ZEN_API_KEY = $InstallApiKey
+        $OnLog.Invoke("info", "CODEX_HOME is overridden - NOT touching the User env key (set OPENCODE_ZEN_API_KEY yourself).")
+    }
     $OnProgress.Invoke(40)
 
     # --- model ---
@@ -360,7 +372,8 @@ function Start-CliInstaller {
     $Key = $ApiKey
     if ([string]::IsNullOrEmpty($Key)) { $Key = Get-SavedKey }
     if (-not [string]::IsNullOrEmpty($Key)) {
-        Write-ConsoleLine "ok" "Found a saved API key: $(Get-KeyPreview $Key)"
+        if ($ApiKey) { Write-ConsoleLine "ok" "Using API key from -ApiKey: $(Get-KeyPreview $Key)" }
+        else         { Write-ConsoleLine "ok" "Found a saved API key: $(Get-KeyPreview $Key)" }
         if ($Interactive -and $ApiKey -eq "") {
             $Change = Read-Host "Use this key? [Y/n]"
             if ($Change -match '^[nN]') { $Key = "" }
@@ -460,7 +473,7 @@ function Start-CliInstaller {
 # Graphical UI (WinForms)
 # -----------------------------------------------------------------------------
 function Show-GuiInstaller {
-    param([string]$ExistingKey, [string]$DefaultModel, [int]$DefaultPort, [bool]$StartProxyDefault, [bool]$SmokeTest)
+    param([string]$ExistingKey, [string]$DefaultModel, [int]$DefaultPort, [bool]$StartProxyDefault, [bool]$SmokeTest, [bool]$Probe)
 
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -798,6 +811,20 @@ function Show-GuiInstaller {
         return $true
     }
 
+    if ($Probe) {
+        $result = [pscustomobject]@{
+            formSize = "$($form.ClientSize.Width)x$($form.ClientSize.Height)"
+            controls = $form.Controls.Count
+            reqBar   = $reqBar.Value
+            tokBar   = $tokBar.Value
+            reqLbl   = $reqLbl.Text
+            tokLbl   = $tokLbl.Text
+            status   = $usageStatus.Text
+        }
+        $form.Dispose()
+        return $result
+    }
+
     [void]$form.ShowDialog()
     $form.Dispose()
     return $true
@@ -809,9 +836,10 @@ function Show-GuiInstaller {
 $SavedKey = Get-SavedKey
 $DefaultModel = if ($Model) { $Model } else { $FreeModels[0].Slug }
 
-if ($GuiSmoke -or (-not $Cli -and (Test-Interactive))) {
+if ($GuiSmoke -or $GuiProbe -or (-not $Cli -and (Test-Interactive))) {
     try {
-        [void](Show-GuiInstaller -ExistingKey $SavedKey -DefaultModel $DefaultModel -DefaultPort $Port -StartProxyDefault (-not $NoStart) -SmokeTest $GuiSmoke)
+        $r = Show-GuiInstaller -ExistingKey $SavedKey -DefaultModel $DefaultModel -DefaultPort $Port -StartProxyDefault (-not $NoStart) -SmokeTest $GuiSmoke -Probe $GuiProbe
+        if ($GuiProbe) { $r | ConvertTo-Json -Compress }
         exit 0
     } catch {
         Write-Host "   [!]    GUI unavailable ($($_.Exception.Message)). Using the terminal UI." -ForegroundColor Yellow
