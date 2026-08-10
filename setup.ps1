@@ -12,8 +12,9 @@
 #   powershell -ExecutionPolicy Bypass -File setup.ps1
 #
 #   # or the fully single-line form (works from cmd, PowerShell, and bash;
-#   # no $variables so nothing gets expanded by the outer shell):
-#   powershell -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1' | iex"
+#   # no $variables so nothing gets expanded by the outer shell; the UTF-8
+#   # BOM irm leaves at the start of the text is stripped so iex can parse):
+#   powershell -ExecutionPolicy Bypass -Command "iex ((irm 'https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1').TrimStart([char]0xFEFF))"
 #
 # Options:
 #   -ApiKey   <key>   OpenCode Zen API key (skips the key prompt)

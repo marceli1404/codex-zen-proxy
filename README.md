@@ -22,7 +22,7 @@ The installer walks you through this interactively, but here's the whole flow so
 Prerequisites: Windows, PowerShell, [Node.js](https://nodejs.org) >= 16, and an [OpenCode Zen](https://opencode.ai) API key (see above).
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1' | iex"
+powershell -ExecutionPolicy Bypass -Command "iex ((irm 'https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1').TrimStart([char]0xFEFF))"
 ```
 
 Or, from a clone:
