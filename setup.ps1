@@ -43,7 +43,7 @@ $ErrorActionPreference = "Stop"
 # -----------------------------------------------------------------------------
 $AuthUrl      = "https://opencode.ai/auth"
 $GithubRepo   = "https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main"
-$CompanionFiles = @("responses-proxy.js", "start-proxy.ps1", "model-catalog.json")
+$CompanionFiles = @("responses-proxy.js", "start-proxy.ps1", "switch-model.ps1", "model-catalog.json")
 
 $FreeModels = @(
     @{ Slug = "mimo-v2.5-free";         Name = "Mimo 2.5 (free) - balanced all-rounder (default)" },

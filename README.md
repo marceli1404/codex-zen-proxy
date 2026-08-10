@@ -41,7 +41,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -ApiKey sk-xxxx -Model big-pi
 What `setup.ps1` does:
 
 1. Checks Node.js.
-2. Installs `responses-proxy.js`, `start-proxy.ps1`, and `model-catalog.json` into `%USERPROFILE%\.codex` (respects `CODEX_HOME`).
+2. Installs `responses-proxy.js`, `start-proxy.ps1`, `switch-model.ps1`, and `model-catalog.json` into `%USERPROFILE%\.codex` (respects `CODEX_HOME`).
 3. Shows the **API key section**: reuses your saved key if present, or guides you through getting one and prompts with masked input; saves it to the Windows **User** environment.
 4. Lets you pick a **model** (numbered menu) and writes it to `config.toml`.
 5. Auto-detects the Codex `node_repl.exe` runtime (Computer Use / MCP plugins) and wires it up.
@@ -55,7 +55,16 @@ Then **fully quit and restart** the Codex desktop app, or test the CLI immediate
 codex exec -c model=mimo-v2.5-free -c model_provider=opencode-zen "say hello"
 ```
 
-Switch models by editing `model` in `%USERPROFILE%\.codex\config.toml` (free models: `big-pickle`, `mimo-v2.5-free`, `deepseek-v4-flash-free`, `ling-3.0-flash-free`, `nemotron-3-ultra-free`, `north-mini-code-free`, `laguna-s-2.1-free`).
+Switch models **instantly** (no desktop restart) with the included switcher:
+
+```powershell
+# interactive menu
+powershell -ExecutionPolicy Bypass -File %USERPROFILE%\.codex\switch-model.ps1
+# or directly, non-interactive
+powershell -ExecutionPolicy Bypass -File %USERPROFILE%\.codex\switch-model.ps1 -Slug big-pickle
+```
+
+It calls `PUT /v1/model?slug=<slug>` on the running proxy (the very next prompt uses the new model) **and** updates `model` in `config.toml` so the setting survives restarts. Free models: `big-pickle`, `mimo-v2.5-free`, `deepseek-v4-flash-free`, `ling-3.0-flash-free`, `nemotron-3-ultra-free`, `north-mini-code-free`, `laguna-s-2.1-free`. You can also edit `model` in `config.toml` directly (takes effect on the next app restart).
 
 ## How it works
 
@@ -94,6 +103,31 @@ The proxy performs three critical translations:
 
 Also handled: `developer` role → `system`, `input_text` blocks → plain strings, `reasoning` items dropped, `function_call`/`function_call_output` history re-mapped into `tool_calls`/`tool` messages, tool-name dedup on repeated SSE deltas.
 
+## Context / token meter inside Codex
+
+The proxy appends a one-line meter to every assistant response it relays, so you can see your context fill and per-turn + daily usage right in the Codex window:
+
+```
+[ctx 12.3K/200K (6%) | in 12.3K | out 480 | today 24.5K tok, 41 req]
+```
+
+It also sends spec-compliant `usage` (`input_tokens`, `output_tokens`, `total_tokens`) on the `response.completed` event, so any client that reads usage gets real numbers.
+
+- Context window defaults to `200000` tokens (`CODEX_ZEN_CONTEXT`); the daily figures come from the same per-day tracker behind `/v1/usage`.
+- Disable the meter line with `CODEX_ZEN_METER=0` (the `response.completed` `usage` is still emitted).
+- Note: the meter line becomes part of the assistant message history, so it costs a few tokens per turn when re-sent.
+
+## Model switching endpoints
+
+| Endpoint | Action |
+|----------|--------|
+| `GET /v1/model` | Current override + free-model list (`{"override": "big-pickle" | null, freeModels: [...]}`) |
+| `PUT /v1/model?slug=<slug>` | Set the override (applies to the **next** prompt, no restart). Unknown slug → `400` with the valid list |
+| `DELETE /v1/model` | Clear the override (reverts to the `config.toml` model) |
+| `GET /v1/models` | All free models (`object: "list"`) |
+
+The override is a per-request remap inside the proxy (`>> MODEL REMAP: sent -> override` in the log), persisted to `~/.codex/zen-model-override.json`, and cleared on `DELETE`. `switch-model.ps1` is a thin menu wrapper around these endpoints.
+
 ## Free quota tracking
 
 OpenCode Zen has **no public quota/balance API**, so the proxy measures your usage itself: it counts every relayed request and its input/output tokens, bucketed per UTC day, and persists them to `~/.codex/zen-usage.json` (atomic write, survives restarts). The installer (CLI + GUI) and `push.ps1` display the result as two progress bars.
@@ -107,9 +141,10 @@ OpenCode Zen has **no public quota/balance API**, so the proxy measures your usa
 
 | File | Purpose |
 |------|---------|
-| `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY`, `CODEX_ZEN_REQ_LIMIT`, `CODEX_ZEN_TOKEN_LIMIT` |
+| `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY`, `CODEX_ZEN_REQ_LIMIT`, `CODEX_ZEN_TOKEN_LIMIT`, `CODEX_ZEN_METER` (`1`/`0`), `CODEX_ZEN_CONTEXT` (200000) |
 | `setup.ps1` | One-command installer described above |
 | `start-proxy.ps1` | Manually launch the proxy (reads the API key from the User environment) |
+| `switch-model.ps1` | Menu / one-liner model switcher for the running proxy + config.toml |
 | `model-catalog.json` | Minimal Codex model catalog exposing the 7 free Zen models |
 | `push.ps1` | Show today's free quota bar, then commit + push this repo |
 

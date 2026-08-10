@@ -12,7 +12,18 @@
 //   CODEX_ZEN_LOG_DIR   - log + debug files dir  (default ~/.codex)
 //   CODEX_ZEN_DEBUG_FILES - set to "1" to write last-raw-incoming.json,
 //                           last-upstream-body.json and raw-sse-deltas.log
+//   CODEX_ZEN_METER     - "1" (default) appends a context/token meter line to
+//                         every assistant message; "0" disables
+//   CODEX_ZEN_CONTEXT   - context-window size used by the meter (default 200000)
 //   OPENCODE_ZEN_API_KEY - API key sent upstream (required)
+//
+// Model switching (instant, no desktop restart):
+//   The Codex desktop sends the model from its config.toml; you can remap it
+//   per-request here. State persists to zen-model-override.json in LOG_DIR:
+//     GET  /v1/model              -> { override, freeModels }
+//     PUT  /v1/model?slug=<slug>  -> set override (must be a free model)
+//     DELETE /v1/model            -> clear override (use config.toml model)
+//   Companion script: switch-model.ps1 (menu, or switch-model.ps1 -Slug big-pickle)
 
 const http = require('http');
 const https = require('https');
@@ -36,6 +47,13 @@ const DEBUG_FILES = process.env.CODEX_ZEN_DEBUG_FILES === '1';
 const REQ_LIMIT = parseInt(process.env.CODEX_ZEN_REQ_LIMIT || '200', 10);
 const TOKEN_LIMIT = parseInt(process.env.CODEX_ZEN_TOKEN_LIMIT || '500000', 10);
 const USAGE_FILE = path.join(LOG_DIR, 'zen-usage.json');
+const MODEL_OVERRIDE_FILE = path.join(LOG_DIR, 'zen-model-override.json');
+const METER = process.env.CODEX_ZEN_METER !== '0';
+const CONTEXT_WINDOW = parseInt(process.env.CODEX_ZEN_CONTEXT || '200000', 10);
+const FREE_MODELS = [
+  'mimo-v2.5-free', 'big-pickle', 'deepseek-v4-flash-free', 'ling-3.0-flash-free',
+  'nemotron-3-ultra-free', 'north-mini-code-free', 'laguna-s-2.1-free'
+];
 
 fs.mkdirSync(LOG_DIR, { recursive: true });
 
@@ -112,6 +130,55 @@ function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
   console.log(line);
   fs.appendFileSync(LOG, line + '\n');
+}
+
+// --- model override (instant model switching) --------------------------------
+function loadModelOverride() {
+  try {
+    const raw = fs.readFileSync(MODEL_OVERRIDE_FILE, 'utf8');
+    const saved = JSON.parse(raw);
+    if (saved && typeof saved.slug === 'string' && saved.slug) return saved.slug;
+  } catch { /* none set yet */ }
+  return null;
+}
+
+function saveModelOverride(slug) {
+  if (!slug) {
+    try { fs.unlinkSync(MODEL_OVERRIDE_FILE); } catch { /* already gone */ }
+    return;
+  }
+  fs.writeFileSync(MODEL_OVERRIDE_FILE + '.tmp', JSON.stringify({ slug }, null, 2));
+  fs.renameSync(MODEL_OVERRIDE_FILE + '.tmp', MODEL_OVERRIDE_FILE);
+}
+
+let modelOverride = loadModelOverride();
+
+// --- context / token meter ---------------------------------------------------
+function fmtK(n) {
+  n = Number(n) || 0;
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'K';
+  return String(Math.round(n));
+}
+
+// Line appended to each assistant message showing context use, input/output
+// tokens and the day's running total. Toggle with CODEX_ZEN_METER=0.
+function meterLine(inT, outT) {
+  if (!METER) return '';
+  const ctx = Number(inT) || 0;
+  const pct = CONTEXT_WINDOW ? ((ctx / CONTEXT_WINDOW) * 100).toFixed(1) : '?';
+  const dayTok = (usage.totalTokens || 0) + ctx + (Number(outT) || 0);
+  const dayReq = (usage.requests || 0) + 1;
+  return `\n\n[ctx ${fmtK(ctx)}/${fmtK(CONTEXT_WINDOW)} (${pct}%) | in ${fmtK(ctx)} | out ${fmtK(outT)} | today ${fmtK(dayTok)} tok, ${dayReq} req]`;
+}
+
+function usageForResponse(inT, outT) {
+  const total = (Number(inT) || 0) + (Number(outT) || 0);
+  return {
+    input_tokens: Number(inT) || 0,
+    output_tokens: Number(outT) || 0,
+    total_tokens: total
+  };
 }
 
 // Map of flattened tool name -> {namespace, name} for namespace tools the
@@ -247,11 +314,13 @@ function translateToResponses(chatResponse, requestId) {
 
   const output = [];
   if (choice.message?.content) {
+    let text = choice.message.content;
+    if (METER) text += meterLine(chatResponse.usage?.prompt_tokens, chatResponse.usage?.completion_tokens);
     output.push({
       type: 'message',
       id: `msg_${Date.now()}`,
       role: 'assistant',
-      content: [{ type: 'output_text', text: choice.message.content }]
+      content: [{ type: 'output_text', text }]
     });
   }
   if (choice.message?.tool_calls) {
@@ -296,7 +365,37 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET' && /\/(v1\/)?models/.test(req.url)) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ object: 'list', data: [{ id: 'big-pickle', object: 'model' }] }));
+    res.end(JSON.stringify({ object: 'list', data: FREE_MODELS.map(id => ({ id, object: 'model' })) }));
+    return;
+  }
+
+  if (req.method === 'GET' && /\/v1\/model$/.test(new URL(req.url, 'http://x').pathname)) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ override: modelOverride, freeModels: FREE_MODELS }));
+    return;
+  }
+
+  if (req.method === 'PUT' && /\/v1\/model$/.test(new URL(req.url, 'http://x').pathname)) {
+    const slug = decodeURIComponent(new URL(req.url, 'http://x').searchParams.get('slug') || '');
+    if (!FREE_MODELS.includes(slug)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Unknown model '${slug}'. Free models: ${FREE_MODELS.join(', ')}` }));
+      return;
+    }
+    modelOverride = slug;
+    saveModelOverride(slug);
+    log(`>> MODEL OVERRIDE SET: ${slug}`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ model: slug, override: slug, freeModels: FREE_MODELS }));
+    return;
+  }
+
+  if (req.method === 'DELETE' && /\/v1\/model$/.test(new URL(req.url, 'http://x').pathname)) {
+    modelOverride = null;
+    saveModelOverride(null);
+    log('>> MODEL OVERRIDE CLEARED (using config.toml model)');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ model: null, override: null, freeModels: FREE_MODELS }));
     return;
   }
 
@@ -312,6 +411,12 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const parsed = JSON.parse(body);
+        // Instant model switch: remap the model the desktop sends to the
+        // override slug (set via PUT /v1/model or switch-model.ps1).
+        if (modelOverride && parsed.model && parsed.model !== modelOverride) {
+          log(`>> MODEL REMAP: ${parsed.model} -> ${modelOverride}`);
+          parsed.model = modelOverride;
+        }
         const chatBody = translateToChatCompletions(parsed);
         const requestId = `resp_${Date.now()}`;
         const isStream = !!parsed.stream;
@@ -479,7 +584,11 @@ const server = http.createServer((req, res) => {
 
             proxyRes.on('end', () => {
               flushEvent();
+              const inT = streamUsage?.prompt_tokens;
+              const outT = streamUsage?.completion_tokens;
               if (msgSent) {
+                // Context/token meter, appended to the visible assistant text.
+                if (METER) fullText += meterLine(inT, outT);
                 sendEvent('response.output_text.done', {
                   type: 'response.output_text.done',
                   item_id: activeItemId, output_index: 0, content_index: 0, text: fullText
@@ -511,7 +620,10 @@ const server = http.createServer((req, res) => {
                 }
               }
               sendEvent('response.completed', {
-                type: 'response.completed', response: { id: requestId, object: 'response', status: 'completed', output: [] }
+                type: 'response.completed', response: {
+                  id: requestId, object: 'response', status: 'completed', output: [],
+                  usage: usageForResponse(inT, outT)
+                }
               });
               res.end();
               recordUsage(chatBody.model, streamUsage?.prompt_tokens, streamUsage?.completion_tokens);
