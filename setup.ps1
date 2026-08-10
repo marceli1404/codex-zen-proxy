@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # Codex <-> OpenCode Zen bridge - one-command setup
 #
 # Installs the Responses-API translation proxy into ~/.codex, generates a
