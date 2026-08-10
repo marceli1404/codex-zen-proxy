@@ -11,8 +11,9 @@
 #   git clone https://github.com/marceli1404/codex-zen-proxy && cd codex-zen-proxy
 #   powershell -ExecutionPolicy Bypass -File setup.ps1
 #
-#   # or the fully single-line form:
-#   powershell -Command "$f = Join-Path $env:TEMP setup.ps1; irm 'https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1' -OutFile $f; & $f"
+#   # or the fully single-line form (works from cmd, PowerShell, and bash;
+#   # no $variables so nothing gets expanded by the outer shell):
+#   powershell -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1' | iex"
 #
 # Options:
 #   -ApiKey   <key>   OpenCode Zen API key (skips the key prompt)
@@ -24,7 +25,6 @@
 #   -GuiProbe         (internal) build the GUI, populate the quota bars, print JSON, exit
 # =============================================================================
 
-[CmdletBinding()]
 param(
     [string]$ApiKey = "",
     [string]$Model = "",
