@@ -22,6 +22,11 @@
 #   -Port     <int>   Proxy listen port (default 4001)
 #   -NoStart          Install/configure only, do not launch the proxy
 #   -Cli              Force the terminal UI (no GUI window)
+#   -Revert           Revert Codex to the original OpenAI / ChatGPT setup:
+#                     stop the proxy, remove auto-start, restore config.toml
+#                     from its pre-install backup, delete the bridge files
+#   -RemoveKey        (with -Revert) also delete OPENCODE_ZEN_API_KEY from the
+#                     User environment
 #   -GuiSmoke         (internal) build the GUI without showing it
 #   -GuiProbe         (internal) build the GUI, populate the quota bars, print JSON, exit
 # =============================================================================
@@ -32,6 +37,8 @@ param(
     [int]$Port = 4001,
     [switch]$NoStart,
     [switch]$Cli,
+    [switch]$Revert,
+    [switch]$RemoveKey,
     [switch]$GuiSmoke,
     [switch]$GuiProbe
 )
@@ -474,6 +481,127 @@ requires_openai_auth = false
 }
 
 # -----------------------------------------------------------------------------
+# Revert / uninstall - undoes Invoke-BridgeInstall so the Codex app goes back
+# to its original OpenAI / ChatGPT setup:
+#   1. stop the proxy on $RevertPort
+#   2. remove auto-start (scheduled task + HKCU Run entry)
+#   3. restore config.toml from the pre-install backup (.bak-*)
+#   4. delete the bridge files (responses-proxy.js, start-proxy.ps1,
+#      switch-model.ps1, model-catalog.json)
+#   5. optionally remove OPENCODE_ZEN_API_KEY from the User environment
+# Returns a result hashtable.
+# -----------------------------------------------------------------------------
+function Invoke-BridgeRevert {
+    param(
+        [int]$RevertPort = 4001,
+        [bool]$RemoveKey = $false,
+        [scriptblock]$OnLog,
+        [scriptblock]$OnProgress
+    )
+
+    $CodexHome = Get-ResolvedCodexHome
+    $OnProgress.Invoke(5)
+
+    # --- 1. stop the proxy ---
+    $ProxyStopped = $false
+    try {
+        $Conn = Get-NetTCPConnection -LocalPort $RevertPort -State Listen -ErrorAction SilentlyContinue
+        if ($Conn) {
+            $Procs = $Conn | Select-Object -ExpandProperty OwningProcess -Unique
+            foreach ($p in $Procs) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+            $OnLog.Invoke("ok", "Stopped the proxy on port $RevertPort.")
+            $ProxyStopped = $true
+        } else {
+            $OnLog.Invoke("info", "No proxy running on port $RevertPort - nothing to stop.")
+        }
+    } catch {
+        $OnLog.Invoke("warn", "Could not stop the proxy: $($_.Exception.Message)")
+    }
+    $OnProgress.Invoke(30)
+
+    # --- 2. remove auto-start (only for the default home, mirroring install) ---
+    $DefaultHome = Join-Path $env:USERPROFILE ".codex"
+    $AutoStartRemoved = $false
+    if ($CodexHome -eq $DefaultHome) {
+        $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        $RunValueName = "CodexZenProxy"
+        try {
+            if (Get-ItemProperty -Path $RunKey -Name $RunValueName -ErrorAction SilentlyContinue) {
+                Remove-ItemProperty -Path $RunKey -Name $RunValueName -ErrorAction SilentlyContinue
+                $AutoStartRemoved = $true
+                $OnLog.Invoke("ok", "Removed '$RunValueName' from HKCU\...\Run.")
+            } else {
+                $OnLog.Invoke("info", "No '$RunValueName' HKCU Run entry to remove.")
+            }
+        } catch {
+            $OnLog.Invoke("warn", "Could not remove the HKCU Run entry: $($_.Exception.Message)")
+        }
+        try {
+            Unregister-ScheduledTask -TaskName "CodexZenProxy" -Confirm:$false -ErrorAction Stop | Out-Null
+            $AutoStartRemoved = $true
+            $OnLog.Invoke("ok", "Removed scheduled task 'CodexZenProxy'.")
+        } catch {
+            $OnLog.Invoke("info", "No 'CodexZenProxy' scheduled task to remove.")
+        }
+    } else {
+        $OnLog.Invoke("info", "CODEX_HOME is overridden - NOT touching auto-start for the default home.")
+    }
+    $OnProgress.Invoke(55)
+
+    # --- 3. restore config.toml from the newest backup ---
+    $ConfigPath = Join-Path $CodexHome "config.toml"
+    $RestoredFrom = $null
+    $Backup = @(Get-ChildItem -Path "$ConfigPath.bak-*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+    if ($Backup) {
+        Copy-Item $Backup[0].FullName $ConfigPath -Force
+        $RestoredFrom = $Backup[0].Name
+        $OnLog.Invoke("ok", "Restored config.toml from backup: $RestoredFrom")
+    } else {
+        $OnLog.Invoke("warn", "No config.toml backup found (.bak-*). The installer rewrote the file, so a manual restore may be needed - check your backups or re-run setup then revert after install creates a backup.")
+    }
+    $OnProgress.Invoke(75)
+
+    # --- 4. delete the bridge files ---
+    foreach ($f in $CompanionFiles) {
+        $target = Join-Path $CodexHome $f
+        if (Test-Path $target) {
+            Remove-Item $target -Force -ErrorAction SilentlyContinue
+            $OnLog.Invoke("ok", "Removed $f")
+        } else {
+            $OnLog.Invoke("info", "$f not present - skipped.")
+        }
+    }
+    $OnProgress.Invoke(90)
+
+    # --- 5. remove the API key from the User environment (only for the
+    #         default home, mirroring install - never clobber the real env
+    #         when CODEX_HOME is overridden for testing) ---
+    if ($RemoveKey) {
+        if ($CodexHome -eq $DefaultHome) {
+            try {
+                [System.Environment]::SetEnvironmentVariable("OPENCODE_ZEN_API_KEY", $null, "User")
+                $OnLog.Invoke("ok", "Removed OPENCODE_ZEN_API_KEY from your User environment.")
+            } catch {
+                $OnLog.Invoke("warn", "Could not remove OPENCODE_ZEN_API_KEY: $($_.Exception.Message)")
+            }
+        } else {
+            $OnLog.Invoke("info", "CODEX_HOME is overridden - NOT touching the User env key.")
+        }
+    } else {
+        $OnLog.Invoke("info", "Kept OPENCODE_ZEN_API_KEY in your User environment (pass -RemoveKey to delete it too).")
+    }
+    $OnProgress.Invoke(100)
+
+    return @{
+        CodexHome    = $CodexHome
+        ProxyStopped = $ProxyStopped
+        RestoredFrom = $RestoredFrom
+        AutoStartRemoved = $AutoStartRemoved
+        RemoveKey    = $RemoveKey
+    }
+}
+
+# -----------------------------------------------------------------------------
 # Terminal UI
 # -----------------------------------------------------------------------------
 function Start-CliInstaller {
@@ -587,6 +715,61 @@ function Start-CliInstaller {
         Write-SectionHeader "Free quota today (live)"
         Write-UsageBar -Usage (Get-ZenUsage -Port $Port) -Port $Port
     }
+}
+
+# -----------------------------------------------------------------------------
+# Terminal UI - revert / uninstall flow
+# -----------------------------------------------------------------------------
+function Start-CliRevert {
+    param([int]$Port, [bool]$RemoveKey)
+
+    Write-CliBanner
+    $Interactive = Test-Interactive
+    $CodexHome = Get-ResolvedCodexHome
+
+    Write-SectionHeader "Revert to original OpenAI Codex"
+    Write-ConsoleLine "info" "This stops the proxy, removes auto-start, restores your"
+    Write-ConsoleLine "info" "pre-install config.toml, and deletes the bridge files."
+    if ($RemoveKey) {
+        Write-ConsoleLine "warn" "OPENCODE_ZEN_API_KEY will also be removed from your User environment."
+    } else {
+        Write-ConsoleLine "info" "OPENCODE_ZEN_API_KEY stays in your User environment (use -RemoveKey to delete it too)."
+    }
+
+    if ($Interactive) {
+        $Confirm = Read-Host "Proceed? [y/N]"
+        if ($Confirm -notmatch '^[yY]') {
+            Write-ConsoleLine "warn" "Revert cancelled."
+            return $null
+        }
+    }
+
+    $Bar = { param($pct) try { [Console]::Write("`r   [" + ("█" * [int]($pct / 4)) + ("·" * (25 - [int]($pct / 4))) + "] $pct%") } catch {} }
+    $Result = $null
+    try {
+        $Result = Invoke-BridgeRevert -RevertPort $Port -RemoveKey $RemoveKey -OnLog { param($l, $m) Write-ConsoleLine $l $m } -OnProgress $Bar
+        Write-Host ""
+        Write-Host ""
+    } catch {
+        Write-Host ""
+        Write-ConsoleLine "err" $_.Exception.Message
+        exit 1
+    }
+
+    $RestoreLine = if ($Result.RestoredFrom) { "Config  : restored from $($Result.RestoredFrom)" } else { "Config  : no backup found - restore manually" }
+    $AutoStartLine = if ($Result.AutoStartRemoved) { "Auto-start: removed" } else { "Auto-start: skipped (CODEX_HOME overridden)" }
+    Write-ResultBox -Title "Revert complete" -Lines @(
+        "Codex   : $($Result.CodexHome)"
+        $RestoreLine
+        "Proxy   : stopped"
+        $AutoStartLine
+        ""
+        "1. Fully quit and restart the OpenAI Codex desktop app."
+        "2. It should now use your normal OpenAI / ChatGPT login."
+        "3. Re-run setup.ps1 any time to switch back to OpenCode Zen."
+    )
+
+    return $Result
 }
 
 # -----------------------------------------------------------------------------
@@ -854,6 +1037,65 @@ function Show-GuiInstaller {
     $cancelBtn.Add_Click({ $form.Close() })
     $form.Controls.Add($cancelBtn)
 
+    $revertBtn = New-Object System.Windows.Forms.Button
+    $revertBtn.Location = New-Object System.Drawing.Point(150, 710)
+    $revertBtn.Size = New-Object System.Drawing.Size(130, 34)
+    $revertBtn.Text = "Revert to original"
+    $revertBtn.BackColor = $RED
+    $revertBtn.ForeColor = [System.Drawing.Color]::White
+    $revertBtn.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $revertBtn.FlatAppearance.BorderSize = 0
+    $revertBtn.Add_Click({
+        $confirm = [System.Windows.Forms.MessageBox]::Show($form, "This will stop the proxy, remove auto-start, restore your pre-install config.toml, and delete the bridge files. Your OPENCODE_ZEN_API_KEY stays in the User environment.`n`nRevert Codex to the original OpenAI / ChatGPT setup?", "Revert to original", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+        $revertBtn.Enabled = $false
+        $cancelBtn.Enabled = $false
+        $installBtn.Enabled = $false
+
+        $guiLog = {
+            param($level, $msg)
+            $marker = switch ($level) {
+                "ok"   { "  OK  " }
+                "warn" { " [!]  " }
+                "err"  { " ERR  " }
+                default { " ...  " }
+            }
+            [void]$logBox.Items.Add($marker + $msg)
+            $logBox.TopIndex = $logBox.Items.Count - 1
+            $form.Refresh()
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+        $guiProg = {
+            param($pct)
+            $progress.Value = [Math]::Min(100, [Math]::Max(0, [int]$pct))
+            $form.Refresh()
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+
+        try {
+            $r = Invoke-BridgeRevert -RevertPort ([int]$portBox.Value) -RemoveKey $false -OnLog $guiLog -OnProgress $guiProg
+            $restoreLine = if ($r.RestoredFrom) { "  Config  : restored from $($r.RestoredFrom)" } else { "  Config  : no backup found - restore manually" }
+            $autoStartLine = if ($r.AutoStartRemoved) { "  Auto-start: removed" } else { "  Auto-start: skipped (CODEX_HOME overridden)" }
+            $summary = "Reverted to the original OpenAI Codex setup!" + [Environment]::NewLine + [Environment]::NewLine +
+                "  Codex   : $($r.CodexHome)" + [Environment]::NewLine +
+                $restoreLine + [Environment]::NewLine +
+                "  Proxy   : stopped" + [Environment]::NewLine +
+                $autoStartLine + [Environment]::NewLine + [Environment]::NewLine +
+                "1. Fully quit and restart the OpenAI Codex desktop app." + [Environment]::NewLine +
+                "2. It should now use your normal OpenAI / ChatGPT login." + [Environment]::NewLine +
+                "3. Re-run setup.ps1 any time to switch back to OpenCode Zen."
+            [System.Windows.Forms.MessageBox]::Show($form, $summary, "Revert complete", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, "Revert failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        } finally {
+            $revertBtn.Enabled = $true
+            $cancelBtn.Enabled = $true
+            $installBtn.Enabled = $true
+        }
+    })
+    $form.Controls.Add($revertBtn)
+
     $installBtn = New-Object System.Windows.Forms.Button
     $installBtn.Location = New-Object System.Drawing.Point(466, 710)
     $installBtn.Size = New-Object System.Drawing.Size(110, 34)
@@ -867,6 +1109,7 @@ function Show-GuiInstaller {
 
         $installBtn.Enabled = $false
         $cancelBtn.Enabled = $false
+        $revertBtn.Enabled = $false
 
         # ---- UI callbacks (run on the UI thread - synchronous install) ----
         $guiLog = {
@@ -894,6 +1137,7 @@ function Show-GuiInstaller {
             [System.Windows.Forms.MessageBox]::Show($form, "Please paste your OpenCode Zen API key (or click 'Get one' to create it).", "API key required", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
             $installBtn.Enabled = $true
             $cancelBtn.Enabled = $true
+            $revertBtn.Enabled = $true
             return
         }
 
@@ -920,6 +1164,7 @@ function Show-GuiInstaller {
         } finally {
             $installBtn.Enabled = $true
             $cancelBtn.Enabled = $true
+            $revertBtn.Enabled = $true
         }
     })
     $form.Controls.Add($installBtn)
@@ -932,9 +1177,11 @@ function Show-GuiInstaller {
     }
 
     if ($Probe) {
+        $btnNames = @($form.Controls | Where-Object { $_ -is [System.Windows.Forms.Button] } | ForEach-Object { $_.Text }) -join " | "
         $result = [pscustomobject]@{
             formSize = "$($form.ClientSize.Width)x$($form.ClientSize.Height)"
             controls = $form.Controls.Count
+            buttons  = $btnNames
             reqBar   = $reqBar.Value
             tokBar   = $tokBar.Value
             reqLbl   = $reqLbl.Text
@@ -955,6 +1202,13 @@ function Show-GuiInstaller {
 # -----------------------------------------------------------------------------
 $SavedKey = Get-SavedKey
 $DefaultModel = if ($Model) { $Model } else { $FreeModels[0].Slug }
+
+# Revert flow: undo the install so Codex goes back to the original OpenAI /
+# ChatGPT setup. Always uses the terminal UI (the GUI has its own Revert button).
+if ($Revert) {
+    Start-CliRevert -Port $Port -RemoveKey $RemoveKey
+    exit 0
+}
 
 if ($GuiSmoke -or $GuiProbe -or (-not $Cli -and (Test-Interactive))) {
     try {

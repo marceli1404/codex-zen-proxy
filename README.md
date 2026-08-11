@@ -36,6 +36,8 @@ The installer is interactive and guided — it shows a step-by-step progress wit
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File setup.ps1 -ApiKey sk-xxxx -Model big-pickle
+# useful options: -Port <int>  -NoStart (configure only)  -Cli (terminal UI)
+#                 -Revert (restore original OpenAI Codex)  -RemoveKey (with -Revert)
 ```
 
 What `setup.ps1` does:
@@ -66,6 +68,31 @@ powershell -ExecutionPolicy Bypass -File %USERPROFILE%\.codex\switch-model.ps1 -
 ```
 
 It calls `PUT /v1/model?slug=<slug>` on the running proxy (the very next prompt uses the new model) **and** updates `model` in `config.toml` so the setting survives restarts. Free models: `big-pickle`, `mimo-v2.5-free`, `deepseek-v4-flash-free`, `ling-3.0-flash-free`, `nemotron-3-ultra-free`, `north-mini-code-free`, `laguna-s-2.1-free`. You can also edit `model` in `config.toml` directly (takes effect on the next app restart).
+
+## Revert to the original OpenAI Codex app
+
+Want to go back to the normal Codex desktop app / ChatGPT login (no Zen, no proxy)? The installer can undo everything it did:
+
+```powershell
+# from a clone:
+powershell -ExecutionPolicy Bypass -File setup.ps1 -Revert
+# or directly from GitHub:
+powershell -ExecutionPolicy Bypass -Command "iex ((irm 'https://raw.githubusercontent.com/marceli1404/codex-zen-proxy/main/setup.ps1').TrimStart([char]0xFEFF)) -Revert"
+```
+
+Or click the **"Revert to original"** button in the graphical installer (bottom-left, red).
+
+What `-Revert` does:
+
+1. Stops the proxy on the configured port.
+2. Removes the `CodexZenProxy` logon scheduled task and/or HKCU `Run` entry (auto-start).
+3. Restores `config.toml` from the pre-install backup it made when you ran setup (newest `.bak-*`).
+4. Deletes the bridge files (`responses-proxy.js`, `start-proxy.ps1`, `switch-model.ps1`, `model-catalog.json`).
+5. Keeps `OPENCODE_ZEN_API_KEY` in your User environment by default; pass `-RemoveKey` to delete it too.
+
+Then **fully quit and restart** the Codex desktop app — it should use your normal OpenAI / ChatGPT login again. Re-run `setup.ps1` any time to switch back to OpenCode Zen.
+
+> Note: if no `config.toml.bak-*` exists (e.g. setup was never run), revert warns you to restore that file manually. With `CODEX_HOME` overridden, revert still restores files but skips auto-start and proxy cleanup for the default home.
 
 ## How it works
 
@@ -143,7 +170,7 @@ OpenCode Zen has **no public quota/balance API**, so the proxy measures your usa
 | File | Purpose |
 |------|---------|
 | `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY`, `CODEX_ZEN_REQ_LIMIT`, `CODEX_ZEN_TOKEN_LIMIT`, `CODEX_ZEN_METER` (`1`/`0`), `CODEX_ZEN_CONTEXT` (200000) |
-| `setup.ps1` | One-command installer described above |
+| `setup.ps1` | One-command installer described above; also `-Revert` (and GUI "Revert to original" button) to restore the original OpenAI Codex setup |
 | `start-proxy.ps1` | Manually launch the proxy (reads the API key from the User environment); also invoked by the logon task. Idempotent — exits 0 if the proxy is already listening |
 | `switch-model.ps1` | Menu / one-liner model switcher for the running proxy + config.toml |
 | `model-catalog.json` | Minimal Codex model catalog exposing the 7 free Zen models |
