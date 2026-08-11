@@ -181,6 +181,56 @@ function Write-UsageBar {
 }
 
 # -----------------------------------------------------------------------------
+# Proxy auto-start: makes the bridge come up after every reboot without
+# re-running setup (fixes "must reinstall the repo each restart to open
+# localhost"). Prefers a logon scheduled task; falls back to an HKCU\...\Run
+# entry (works without elevation). start-proxy.ps1 is idempotent so running it
+# again when the proxy is already up is harmless.
+# -----------------------------------------------------------------------------
+function Register-ProxyAutoStart {
+    param(
+        [string]$CodexHome,
+        [int]$Port = 4001,
+        [scriptblock]$OnLog
+    )
+    $RunValueName = "CodexZenProxy"
+    $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    $StartScript = Join-Path $CodexHome "start-proxy.ps1"
+    if (-not (Test-Path $StartScript)) {
+        $OnLog.Invoke("warn", "start-proxy.ps1 not found - cannot register auto-start.")
+        return $false
+    }
+    $RunCmd = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $StartScript
+
+    # 1) Prefer a logon scheduled task (needs elevation; fine to skip silently).
+    $taskOk = $false
+    try {
+        $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScript`""
+        $Trigger = New-ScheduledTaskTrigger -AtLogOn
+        $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 0)
+        Register-ScheduledTask -TaskName "CodexZenProxy" -Action $Action -Trigger $Trigger -Settings $Settings -Description "Auto-start the OpenCode Zen <-> Codex proxy at logon (port $Port)." -Force -ErrorAction Stop | Out-Null
+        $taskOk = $true
+        $OnLog.Invoke("ok", "Registered logon task 'CodexZenProxy' - proxy will auto-start on reboot.")
+    } catch {
+        $OnLog.Invoke("info", "Scheduled task needs elevation - using the HKCU Run key instead.")
+    }
+
+    # 2) Fall back to / also set the HKCU Run entry (reliable, no elevation).
+    if (-not $taskOk) {
+        try {
+            New-Item -Path $RunKey -Force | Out-Null
+            Set-ItemProperty -Path $RunKey -Name $RunValueName -Value $RunCmd -Force
+            $OnLog.Invoke("ok", "Registered '$RunValueName' in HKCU\...\Run - proxy will auto-start on reboot.")
+            return $true
+        } catch {
+            $OnLog.Invoke("warn", "Could not register auto-start: $($_.Exception.Message)")
+            return $false
+        }
+    }
+    return $true
+}
+
+# -----------------------------------------------------------------------------
 # Core install routine - shared by the GUI and the terminal UI.
 # Emits progress via $OnProgress (percent 0-100) and log lines via
 # $OnLog($level, $msg). Returns a result hashtable.
@@ -277,6 +327,78 @@ function Invoke-BridgeInstall {
         $OnLog.Invoke("info", "Backed up existing config to $Backup")
     }
     $CatalogPath = (Join-Path $CodexHome "model-catalog.json") -replace "'", "''"
+
+    # Paths derived from the detected node_repl runtime (mirrors the working
+    # reference device's app-managed config so plugins work out of the box).
+    $NotifyLine = ""
+    $NodeReplCfg = ""
+    if ($NodeRepl -and $Latest) {
+        $RuntimeRoot   = $Latest.FullName
+        $NodeModules   = Join-Path $RuntimeRoot "bin\node_modules"
+        $NodeExe       = Join-Path $RuntimeRoot "bin\node.exe"
+        $ComputerUse   = Join-Path $NodeModules "@oai\sky\bin\windows\codex-computer-use.exe"
+        $Esc = { param($p) ($p -replace "'", "''") }
+        $CodexHomeT    = & $Esc $CodexHome
+        $NodeReplT     = & $Esc $NodeRepl
+        $NodeModulesT  = & $Esc $NodeModules
+        $NodeExeT      = & $Esc $NodeExe
+        $TrustedPaths  = "$CodexHomeT;$NodeModulesT"
+        if (Test-Path $ComputerUse) {
+            $NotifyPath = ($ComputerUse -replace '\\', '\\') -replace '"', '\"'
+            $NotifyLine = "`nnotify = [ `"$NotifyPath`", `"turn-ended`" ]"
+        }
+        $NodeReplCfg = @"
+
+[mcp_servers.node_repl]
+command = '$NodeReplT'
+args = []
+startup_timeout_sec = 120
+
+[mcp_servers.node_repl.env]
+NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "1000"
+NODE_REPL_NODE_MODULE_DIRS = '$NodeModulesT'
+NODE_REPL_NODE_PATH = '$NodeExeT'
+NODE_REPL_TRUSTED_CODE_PATHS = '$TrustedPaths'
+CODEX_HOME = '$CodexHomeT'
+BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
+NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER = "Control the in-app browser in conjunction with the Browser Plugin."
+NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME = "Control the Chrome browser in conjunction with the Chrome Plugin. Prefer this method of controlling Chrome over alternatives (such as Computer Use) unless the user explicitly mentions an alternative."
+BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
+
+[desktop]
+followUpQueueMode = "queue"
+"@
+        $Marketplace = Join-Path $CodexHome ".tmp\bundled-marketplaces\openai-bundled"
+        if (Test-Path $Marketplace) {
+            $NodeReplCfg += @"
+
+[marketplaces.openai-bundled]
+last_updated = "$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
+source_type = "local"
+source = '\\?\$Marketplace'
+
+[plugins."browser@openai-bundled"]
+enabled = true
+
+[plugins."chrome@openai-bundled"]
+enabled = true
+
+[plugins."computer-use@openai-bundled"]
+enabled = true
+
+[plugins."visualize@openai-bundled"]
+enabled = true
+
+[shell_environment_policy.set]
+BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
+NODE_REPL_TRUSTED_CODE_PATHS = '$TrustedPaths'
+
+[windows]
+sandbox = "elevated"
+"@
+        }
+    }
+
     $Config = @'
 # === CHANGE MODEL HERE ===
 # Free: big-pickle, deepseek-v4-flash-free, mimo-v2.5-free, ling-3.0-flash-free,
@@ -290,25 +412,15 @@ model_provider = "opencode-zen"
 openai_base_url = "http://localhost:{0}/v1"
 
 model_catalog_json = '{2}'
-
+{3}
 [model_providers.opencode-zen]
 name = "OpenCode Zen"
 base_url = "http://localhost:{0}/v1"
 wire_api = "responses"
 stream_idle_timeout_ms = 120000
 requires_openai_auth = false
-'@ -f $InstallPort, $InstallModel, $CatalogPath
-
-    if ($NodeRepl) {
-        $Config += @"
-
-[mcp_servers.node_repl]
-command = '$NodeRepl'
-args = []
-startup_timeout_sec = 120
-
-"@
-    }
+'@ -f $InstallPort, $InstallModel, $CatalogPath, $NotifyLine
+    $Config += $NodeReplCfg
     [System.IO.File]::WriteAllText($ConfigPath, $Config)
     $OnLog.Invoke("ok", "config.toml written to $ConfigPath")
     $OnProgress.Invoke(85)
@@ -343,6 +455,13 @@ startup_timeout_sec = 120
         }
     } else {
         $OnLog.Invoke("warn", "Skipped proxy start. Launch it later with start-proxy.ps1.")
+    }
+
+    # --- auto-start on reboot ---
+    if ($StartProxy -and $CodexHome -eq $DefaultHome) {
+        [void](Register-ProxyAutoStart -CodexHome $CodexHome -Port $InstallPort -OnLog $OnLog)
+    } else {
+        $OnLog.Invoke("info", "Skipped auto-start registration (set -StartProxy with the default CODEX_HOME to enable logon task + proxy start).")
     }
     $OnProgress.Invoke(100)
 

@@ -44,10 +44,11 @@ What `setup.ps1` does:
 2. Installs `responses-proxy.js`, `start-proxy.ps1`, `switch-model.ps1`, and `model-catalog.json` into `%USERPROFILE%\.codex` (respects `CODEX_HOME`).
 3. Shows the **API key section**: reuses your saved key if present, or guides you through getting one and prompts with masked input; saves it to the Windows **User** environment.
 4. Lets you pick a **model** (numbered menu) and writes it to `config.toml`.
-5. Auto-detects the Codex `node_repl.exe` runtime (Computer Use / MCP plugins) and wires it up.
+5. Auto-detects the Codex `node_repl.exe` runtime (Computer Use / MCP plugins) and wires it up — including the full `[mcp_servers.node_repl.env]` block, `notify` (turn-ended), and the bundled `openai-bundled` plugins (`browser`, `chrome`, `computer-use`, `visualize`) enabled, mirroring a known-good working device.
 6. Backs up any existing `config.toml` and generates a fresh one pointing Codex at `http://localhost:4001/v1`.
 7. (Re)starts the proxy and health-checks `http://localhost:4001/health`.
-8. Shows your **free quota today** as two progress bars (requests + tokens), both in the CLI and in the GUI installer.
+8. Registers a **logon scheduled task** (`CodexZenProxy`) that auto-starts the proxy on every reboot — no need to reinstall after a restart.
+9. Shows your **free quota today** as two progress bars (requests + tokens), both in the CLI and in the GUI installer.
 
 Then **fully quit and restart** the Codex desktop app, or test the CLI immediately:
 
@@ -143,7 +144,7 @@ OpenCode Zen has **no public quota/balance API**, so the proxy measures your usa
 |------|---------|
 | `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY`, `CODEX_ZEN_REQ_LIMIT`, `CODEX_ZEN_TOKEN_LIMIT`, `CODEX_ZEN_METER` (`1`/`0`), `CODEX_ZEN_CONTEXT` (200000) |
 | `setup.ps1` | One-command installer described above |
-| `start-proxy.ps1` | Manually launch the proxy (reads the API key from the User environment) |
+| `start-proxy.ps1` | Manually launch the proxy (reads the API key from the User environment); also invoked by the logon task. Idempotent — exits 0 if the proxy is already listening |
 | `switch-model.ps1` | Menu / one-liner model switcher for the running proxy + config.toml |
 | `model-catalog.json` | Minimal Codex model catalog exposing the 7 free Zen models |
 | `push.ps1` | Show today's free quota bar, then commit + push this repo |
