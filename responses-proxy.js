@@ -445,6 +445,7 @@ const server = http.createServer((req, res) => {
 
         const proxyReq = https.request({
           hostname: url.hostname,
+          port: url.port || 443,
           path: url.pathname,
           method: 'POST',
           headers: {
@@ -454,6 +455,27 @@ const server = http.createServer((req, res) => {
           }
         }, proxyRes => {
           if (isStream) {
+            // Non-2xx upstream (e.g. 429 quota / 400 bad request / 5xx) arrives
+            // as a JSON error body, not SSE - relay it as an SSE response.error
+            // so Codex shows a real error instead of hanging or empty output.
+            if (proxyRes.statusCode && proxyRes.statusCode >= 300) {
+              let errBody = '';
+              proxyRes.on('data', c => errBody += c);
+              proxyRes.on('end', () => {
+                log(`<< UPSTREAM HTTP ${proxyRes.statusCode} on stream: ${errBody.slice(0, 300)}`);
+                let msg = `Upstream returned HTTP ${proxyRes.statusCode}`;
+                try { msg = (JSON.parse(errBody).error?.message) || msg; } catch { /* non-JSON */ }
+                res.writeHead(200, {
+                  'Content-Type': 'text/event-stream',
+                  'Cache-Control': 'no-cache',
+                  'Connection': 'keep-alive'
+                });
+                res.write(sseEvent('response.error', { type: 'response.error', message: msg }));
+                res.end();
+              });
+              proxyRes.on('error', err => { /* body already handled */ });
+              return;
+            }
             // SSE streaming: relay and translate chunks
             res.writeHead(200, {
               'Content-Type': 'text/event-stream',
@@ -473,6 +495,15 @@ const server = http.createServer((req, res) => {
             // `codex_app__load_workspace_dependencies` + `shell_command` into
             // `...dependenciesshell_command`, rejected as unsupported call).
             const toolStates = new Map();
+
+            // Robust termination: Codex hangs forever if the SSE stream never
+            // receives response.completed (generation freezes until the user
+            // sends a new message). Upstream may abort/error/stall mid-stream
+            // without firing 'end', so finalize() is guarded, idempotent, and
+            // triggered by end / aborted / error / idle-timeout / res error.
+            let finalized = false;
+            let idleTimer = null;
+            const STREAM_IDLE_MS = Math.max(30000, parseInt(process.env.CODEX_ZEN_STREAM_IDLE_MS || '120000', 10));
 
             const sendEvent = (name, data) => {
               res.write(sseEvent(name, data));
@@ -579,10 +610,20 @@ const server = http.createServer((req, res) => {
 
             proxyRes.on('data', c => {
               buffer += c.toString('utf8');
+              if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+              idleTimer = setTimeout(() => {
+                log(`<< STREAM IDLE ${STREAM_IDLE_MS}ms without data - finalizing`);
+                finalize('idle-timeout');
+              }, STREAM_IDLE_MS);
               flushEvent();
             });
 
-            proxyRes.on('end', () => {
+            // Idempotent stream finalizer: emits the remaining message/tool
+            // done events, response.completed, ends the SSE, records usage.
+            const finalize = (reason) => {
+              if (finalized) return;
+              finalized = true;
+              if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
               flushEvent();
               const inT = streamUsage?.prompt_tokens;
               const outT = streamUsage?.completion_tokens;
@@ -627,7 +668,41 @@ const server = http.createServer((req, res) => {
               });
               res.end();
               recordUsage(chatBody.model, streamUsage?.prompt_tokens, streamUsage?.completion_tokens);
-              log(`<< STREAM COMPLETED (text: ${fullText.slice(0, 80)})`);
+              log(`<< STREAM COMPLETED (${reason}, text: ${fullText.slice(0, 80)})`);
+            };
+
+            // Start the idle watchdog immediately (covers a stream that goes
+            // silent before any data arrives too).
+            idleTimer = setTimeout(() => {
+              log(`<< STREAM IDLE ${STREAM_IDLE_MS}ms without data - finalizing`);
+              finalize('idle-timeout');
+            }, STREAM_IDLE_MS);
+
+            proxyRes.on('end', () => {
+              finalize('end');
+            });
+
+            // Upstream died/reset without 'end' - do NOT let Codex hang.
+            proxyRes.on('aborted', () => {
+              log('<< UPSTREAM ABORTED mid-stream');
+              finalize('aborted');
+            });
+
+            proxyRes.on('error', err => {
+              log(`<< UPSTREAM STREAM ERROR: ${err.message}`);
+              finalize('error');
+            });
+
+            // Last-resort: fires on any close (normal end, abort, socket reset).
+            // finalize() is idempotent so this is a no-op if 'end' ran first.
+            proxyRes.on('close', () => {
+              finalize('close');
+            });
+
+            // Client (Codex) hung up - stop writing to it, stop the watchdog.
+            res.on('error', err => {
+              if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+              log(`<< CLIENT SOCKET ERROR: ${err.message}`);
             });
 
             proxyReq.on('error', err => {
