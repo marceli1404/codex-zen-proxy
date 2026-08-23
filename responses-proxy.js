@@ -12,9 +12,6 @@
 //   CODEX_ZEN_LOG_DIR   - log + debug files dir  (default ~/.codex)
 //   CODEX_ZEN_DEBUG_FILES - set to "1" to write last-raw-incoming.json,
 //                           last-upstream-body.json and raw-sse-deltas.log
-//   CODEX_ZEN_METER     - "1" (default) appends a context/token meter line to
-//                         every assistant message; "0" disables
-//   CODEX_ZEN_CONTEXT   - context-window size used by the meter (default 200000)
 //   OPENCODE_ZEN_API_KEY - API key sent upstream (required)
 //
 // Model switching (instant, no desktop restart):
@@ -48,8 +45,6 @@ const REQ_LIMIT = parseInt(process.env.CODEX_ZEN_REQ_LIMIT || '200', 10);
 const TOKEN_LIMIT = parseInt(process.env.CODEX_ZEN_TOKEN_LIMIT || '500000', 10);
 const USAGE_FILE = path.join(LOG_DIR, 'zen-usage.json');
 const MODEL_OVERRIDE_FILE = path.join(LOG_DIR, 'zen-model-override.json');
-const METER = process.env.CODEX_ZEN_METER !== '0';
-const CONTEXT_WINDOW = parseInt(process.env.CODEX_ZEN_CONTEXT || '200000', 10);
 const FREE_MODELS = [
   'mimo-v2.5-free', 'big-pickle', 'deepseek-v4-flash-free', 'ling-3.0-flash-free',
   'nemotron-3-ultra-free', 'north-mini-code-free', 'laguna-s-2.1-free'
@@ -152,25 +147,6 @@ function saveModelOverride(slug) {
 }
 
 let modelOverride = loadModelOverride();
-
-// --- context / token meter ---------------------------------------------------
-function fmtK(n) {
-  n = Number(n) || 0;
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'K';
-  return String(Math.round(n));
-}
-
-// Line appended to each assistant message showing context use, input/output
-// tokens and the day's running total. Toggle with CODEX_ZEN_METER=0.
-function meterLine(inT, outT) {
-  if (!METER) return '';
-  const ctx = Number(inT) || 0;
-  const pct = CONTEXT_WINDOW ? ((ctx / CONTEXT_WINDOW) * 100).toFixed(1) : '?';
-  const dayTok = (usage.totalTokens || 0) + ctx + (Number(outT) || 0);
-  const dayReq = (usage.requests || 0) + 1;
-  return `\n\n[ctx ${fmtK(ctx)}/${fmtK(CONTEXT_WINDOW)} (${pct}%) | in ${fmtK(ctx)} | out ${fmtK(outT)} | today ${fmtK(dayTok)} tok, ${dayReq} req]`;
-}
 
 function usageForResponse(inT, outT) {
   const total = (Number(inT) || 0) + (Number(outT) || 0);
@@ -315,7 +291,6 @@ function translateToResponses(chatResponse, requestId) {
   const output = [];
   if (choice.message?.content) {
     let text = choice.message.content;
-    if (METER) text += meterLine(chatResponse.usage?.prompt_tokens, chatResponse.usage?.completion_tokens);
     output.push({
       type: 'message',
       id: `msg_${Date.now()}`,
@@ -628,8 +603,6 @@ const server = http.createServer((req, res) => {
               const inT = streamUsage?.prompt_tokens;
               const outT = streamUsage?.completion_tokens;
               if (msgSent) {
-                // Context/token meter, appended to the visible assistant text.
-                if (METER) fullText += meterLine(inT, outT);
                 sendEvent('response.output_text.done', {
                   type: 'response.output_text.done',
                   item_id: activeItemId, output_index: 0, content_index: 0, text: fullText

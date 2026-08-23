@@ -131,19 +131,9 @@ The proxy performs three critical translations:
 
 Also handled: `developer` role → `system`, `input_text` blocks → plain strings, `reasoning` items dropped, `function_call`/`function_call_output` history re-mapped into `tool_calls`/`tool` messages, tool-name dedup on repeated SSE deltas.
 
-## Context / token meter inside Codex
+## Usage reporting
 
-The proxy appends a one-line meter to every assistant response it relays, so you can see your context fill and per-turn + daily usage right in the Codex window:
-
-```
-[ctx 12.3K/200K (6%) | in 12.3K | out 480 | today 24.5K tok, 41 req]
-```
-
-It also sends spec-compliant `usage` (`input_tokens`, `output_tokens`, `total_tokens`) on the `response.completed` event, so any client that reads usage gets real numbers.
-
-- Context window defaults to `200000` tokens (`CODEX_ZEN_CONTEXT`); the daily figures come from the same per-day tracker behind `/v1/usage`.
-- Disable the meter line with `CODEX_ZEN_METER=0` (the `response.completed` `usage` is still emitted).
-- Note: the meter line becomes part of the assistant message history, so it costs a few tokens per turn when re-sent.
+The proxy sends spec-compliant `usage` (`input_tokens`, `output_tokens`, `total_tokens`) on the `response.completed` event, so any client that reads usage gets real numbers. Assistant responses are relayed verbatim — nothing is appended to them.
 
 ## Model switching endpoints
 
@@ -169,7 +159,7 @@ OpenCode Zen has **no public quota/balance API**, so the proxy measures your usa
 
 | File | Purpose |
 |------|---------|
-| `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY`, `CODEX_ZEN_REQ_LIMIT`, `CODEX_ZEN_TOKEN_LIMIT`, `CODEX_ZEN_METER` (`1`/`0`), `CODEX_ZEN_CONTEXT` (200000) |
+| `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY`, `CODEX_ZEN_REQ_LIMIT`, `CODEX_ZEN_TOKEN_LIMIT` |
 | `setup.ps1` | One-command installer described above; also `-Revert` (and GUI "Revert to original" button) to restore the original OpenAI Codex setup |
 | `start-proxy.ps1` | Manually launch the proxy (reads the API key from the User environment); also invoked by the logon task. Idempotent — exits 0 if the proxy is already listening |
 | `switch-model.ps1` | Menu / one-liner model switcher for the running proxy + config.toml |
