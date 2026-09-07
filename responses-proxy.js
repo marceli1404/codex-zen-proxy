@@ -736,5 +736,5 @@ fs.writeFileSync(LOG, '');
 server.listen(PORT, () => {
   log(`Proxy listening on http://localhost:${PORT}`);
   log(`Proxying to ${ZEN_BASE}/chat/completions`);
-  log(`API key: ${API_KEY ? 'set (' + API_KEY.slice(0,8) + '...)' : 'NOT SET'}`);
+  log(`API key: ${API_KEY ? 'set' : 'NOT SET'}`);
 });
