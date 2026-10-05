@@ -9,6 +9,8 @@
 // Configuration (env vars, all optional):
 //   CODEX_ZEN_PORT      - listen port            (default 4001)
 //   CODEX_ZEN_BASE      - upstream base URL      (default https://opencode.ai/zen/v1)
+//   CODEX_ZEN_HOST      - listen host            (default 127.0.0.1; localhost only)
+//   CODEX_ZEN_MAX_REQUEST_BYTES - max request body (default 10 MiB)
 //   CODEX_ZEN_LOG_DIR   - log + debug files dir  (default ~/.codex)
 //   CODEX_ZEN_DEBUG_FILES - set to "1" to write last-raw-incoming.json,
 //                           last-upstream-body.json and raw-sse-deltas.log
@@ -30,6 +32,8 @@ const path = require('path');
 const { URL } = require('url');
 
 const PORT = parseInt(process.env.CODEX_ZEN_PORT || '4001', 10);
+const HOST = process.env.CODEX_ZEN_HOST || '127.0.0.1';
+const MAX_REQUEST_BYTES = parseInt(process.env.CODEX_ZEN_MAX_REQUEST_BYTES || String(10 * 1024 * 1024), 10);
 const ZEN_BASE = process.env.CODEX_ZEN_BASE || 'https://opencode.ai/zen/v1';
 const API_KEY = process.env.OPENCODE_ZEN_API_KEY || '';
 const LOG_DIR = process.env.CODEX_ZEN_LOG_DIR || path.join(os.homedir(), '.codex');
@@ -382,8 +386,21 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST' && /\/(v1\/)?responses/.test(req.url)) {
     let body = '';
-    req.on('data', c => body += c);
+    let bodyBytes = 0;
+    let bodyTooLarge = false;
+    req.on('data', c => {
+      if (bodyTooLarge) return;
+      bodyBytes += c.length;
+      if (bodyBytes > MAX_REQUEST_BYTES) {
+        bodyTooLarge = true;
+        res.writeHead(413, { 'Content-Type': 'application/json', 'Connection': 'close' });
+        res.end(JSON.stringify({ error: { message: 'Request body too large' } }));
+        return;
+      }
+      body += c;
+    });
     req.on('end', () => {
+      if (bodyTooLarge) return;
       try {
         const parsed = JSON.parse(body);
         // Instant model switch: remap the model the desktop sends to the
@@ -733,8 +750,11 @@ const server = http.createServer((req, res) => {
 });
 
 fs.writeFileSync(LOG, '');
-server.listen(PORT, () => {
-  log(`Proxy listening on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  log(`Proxy listening on http://${HOST}:${PORT}`);
+  if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) {
+    log('WARNING: proxy is listening beyond localhost; protect the host with a firewall or trusted network boundary.');
+  }
   log(`Proxying to ${ZEN_BASE}/chat/completions`);
   log(`API key: ${API_KEY ? 'set' : 'NOT SET'}`);
 });
