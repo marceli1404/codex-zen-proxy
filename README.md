@@ -159,7 +159,7 @@ OpenCode Zen has **no public quota/balance API**, so the proxy measures your usa
 
 | File | Purpose |
 |------|---------|
-| `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY`, `CODEX_ZEN_REQ_LIMIT`, `CODEX_ZEN_TOKEN_LIMIT` |
+| `responses-proxy.js` | The bridge (Responses API in, Chat Completions SSE out, reverse-translated). Config via env vars: `CODEX_ZEN_HOST` (`127.0.0.1`), `CODEX_ZEN_PORT` (4001), `CODEX_ZEN_MAX_BODY_BYTES` (10 MiB), `CODEX_ZEN_BASE`, `CODEX_ZEN_LOG_DIR` (`~/.codex`), `CODEX_ZEN_DEBUG_FILES=1`, `OPENCODE_ZEN_API_KEY`, `CODEX_ZEN_REQ_LIMIT`, `CODEX_ZEN_TOKEN_LIMIT` |
 | `setup.ps1` | One-command installer described above; also `-Revert` (and GUI "Revert to original" button) to restore the original OpenAI Codex setup |
 | `start-proxy.ps1` | Manually launch the proxy (reads the API key from the User environment); also invoked by the logon task. Idempotent — exits 0 if the proxy is already listening |
 | `switch-model.ps1` | Menu / one-liner model switcher for the running proxy + config.toml |
@@ -169,6 +169,7 @@ OpenCode Zen has **no public quota/balance API**, so the proxy measures your usa
 ## Troubleshooting
 
 - **Proxy won't start / health check fails** — read `%USERPROFILE%\.codex\proxy-debug.log`. Check the API key is present: `[Environment]::GetEnvironmentVariable('OPENCODE_ZEN_API_KEY','User')`.
+- **Remote/LAN access** — the proxy binds to `127.0.0.1` by default so other devices cannot use your upstream credentials. Only set `CODEX_ZEN_HOST` to a non-loopback address if you intentionally want network exposure and have added an appropriate access-control layer.
 - **Desktop picker doesn't list the free models** — a known upstream client-side allowlist filter strips non-ChatGPT-account models (openai/codex #19694, #32119, #32049, #10867). Not patchable via config; the CLI path works, and setting `model` directly in `config.toml` still routes correctly ("Custom" provider).
 - **`js_repl = false` reappears in config.toml** — the app-server rewrites `[features]` from its own state on startup (upstream #28481). Ignore it; node_repl is still advertised as a namespace tool in current builds.
 - **`unsupported call: mcp__node_repl__js`** — this was the main bug this proxy fixes. If it reappears, enable `CODEX_ZEN_DEBUG_FILES=1`, reproduce, and check `raw-sse-deltas.log` for the flat tool name, then confirm the `output_item.done` event carries `namespace`.

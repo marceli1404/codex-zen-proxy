@@ -30,6 +30,11 @@ const path = require('path');
 const { URL } = require('url');
 
 const PORT = parseInt(process.env.CODEX_ZEN_PORT || '4001', 10);
+const HOST = process.env.CODEX_ZEN_HOST || '127.0.0.1';
+const parsedMaxBodyBytes = Number.parseInt(process.env.CODEX_ZEN_MAX_BODY_BYTES || '', 10);
+const MAX_BODY_BYTES = Number.isFinite(parsedMaxBodyBytes) && parsedMaxBodyBytes > 0
+  ? parsedMaxBodyBytes
+  : 10 * 1024 * 1024;
 const ZEN_BASE = process.env.CODEX_ZEN_BASE || 'https://opencode.ai/zen/v1';
 const API_KEY = process.env.OPENCODE_ZEN_API_KEY || '';
 const LOG_DIR = process.env.CODEX_ZEN_LOG_DIR || path.join(os.homedir(), '.codex');
@@ -382,8 +387,22 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST' && /\/(v1\/)?responses/.test(req.url)) {
     let body = '';
-    req.on('data', c => body += c);
+    let bodyBytes = 0;
+    let rejected = false;
+    req.on('data', c => {
+      if (rejected) return;
+      bodyBytes += c.length;
+      if (bodyBytes > MAX_BODY_BYTES) {
+        rejected = true;
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Request body too large' }));
+        req.destroy();
+        return;
+      }
+      body += c;
+    });
     req.on('end', () => {
+      if (rejected) return;
       try {
         const parsed = JSON.parse(body);
         // Instant model switch: remap the model the desktop sends to the
@@ -733,8 +752,11 @@ const server = http.createServer((req, res) => {
 });
 
 fs.writeFileSync(LOG, '');
-server.listen(PORT, () => {
-  log(`Proxy listening on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  log(`Proxy listening on http://${HOST}:${PORT}`);
+  if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) {
+    log('!! WARNING: proxy is bound to a non-loopback address. Anyone who can reach this port can use the configured upstream API key through the proxy.');
+  }
   log(`Proxying to ${ZEN_BASE}/chat/completions`);
   log(`API key: ${API_KEY ? 'set' : 'NOT SET'}`);
 });
